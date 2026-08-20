@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type RefObject } from 'react'
 import { Game } from './game/Game'
 import type { BannerData, FeedEntry, HudData, OverData, RadarData } from './game/Game'
 
@@ -45,6 +45,7 @@ export default function App() {
   const [lowHp, setLowHp] = useState(false)
   const [nades, setNades] = useState(1)
   const [hint, setHint] = useState(false)
+  const [scoped, setScoped] = useState(false)
 
   // imperative HUD refs
   const hpRef = useRef<HTMLSpanElement>(null)
@@ -66,6 +67,10 @@ export default function App() {
   const reloadRef = useRef<HTMLDivElement>(null)
   const vignetteTimer = useRef(0)
   const bannerTimer = useRef(0)
+  const weaponRef = useRef<HTMLSpanElement>(null)
+  const slot1Ref = useRef<HTMLSpanElement>(null)
+  const slot2Ref = useRef<HTMLSpanElement>(null)
+  const slot3Ref = useRef<HTMLSpanElement>(null)
   const idc = useRef(0)
   const lowHpRef = useRef(false)
   const nadesRef = useRef(1)
@@ -161,6 +166,20 @@ export default function App() {
         nadesRef.current = h.nades
         setNades(h.nades)
       }
+      setTxt(weaponRef.current, h.weapon)
+      const num = h.weapon.charAt(0)
+      const slots: [RefObject<HTMLSpanElement | null>, string][] = [[slot1Ref, '1'], [slot2Ref, '2'], [slot3Ref, '3']]
+      for (const [r, n] of slots) {
+        const el = r.current
+        if (!el || !el.parentElement) continue
+        const on = num === n
+        if (el.dataset.on !== String(on)) {
+          el.dataset.on = String(on)
+          el.style.color = on ? '#f2a33c' : '#8b98a7'
+          el.parentElement.style.borderColor = on ? '#f2a33c' : '#2b3844'
+          el.parentElement.style.background = on ? 'rgba(34,20,9,0.9)' : 'rgba(18,24,31,0.85)'
+        }
+      }
     }
 
     const game = new Game(mountRef.current, {
@@ -202,6 +221,7 @@ export default function App() {
       },
       radar: drawRadar,
       over: (o) => { setOver(o); setScreen('over') },
+      scoped: (s) => setScoped(s),
       lockedChange: (l) => {
         setLocked(l)
         const g = gameRef.current
@@ -233,6 +253,8 @@ export default function App() {
       {/* ============ HUD ============ */}
       {(screen === 'play' || screen === 'paused') && (
         <div className="pointer-events-none absolute inset-0 z-20">
+          {/* ambient vignette */}
+          <div className="pointer-events-none absolute inset-0 z-10" style={{ background: 'radial-gradient(ellipse at center, transparent 58%, rgba(4,7,11,0.45) 100%)' }} />
           {/* top center: score + timer */}
           <div className="absolute left-1/2 top-3 flex -translate-x-1/2 items-stretch">
             <div className="flex items-center gap-2 border border-[#2b4a63] bg-[#101b26]/90 px-4 py-1.5">
@@ -258,6 +280,7 @@ export default function App() {
             <div className="mt-1.5 border border-[#2b3844] bg-[#12181f]/90 px-3 py-1 text-[11px] font-bold tracking-widest text-[#8b98a7]">
               УСТРАНЕНО: <span ref={killsRef} className="font-display text-sm text-[#f2a33c]">0</span>
             </div>
+
           </div>
 
           {/* kill feed */}
@@ -265,16 +288,28 @@ export default function App() {
             {feed.map((f) => (
               <div key={f.id} className="feed-in flex items-center border border-[#2b3844] bg-[#12181f]/90 px-2.5 py-1 text-[12px] font-semibold">
                 <span className={f.byPlayer && f.killer === 'ВЫ' ? 'text-[#6fb7e8]' : 'text-[#f2a33c]'}>{f.killer}</span>
-                {f.head ? <span className="mx-1.5 text-[#e0453a]"><SkullIcon /></span> : f.killer === 'Снабжение' ? <span className="mx-1.5 text-[#8b98a7]">»</span> : <GunTag />}
+                {f.head ? <span className="mx-1.5 text-[#e0453a]"><SkullIcon /></span> : (f.killer === 'Снабжение' || f.killer === 'МАГАЗИН') ? <span className="mx-1.5 text-[#7fd08a]">»</span> : <GunTag />}
                 <span className={f.victim === 'ВЫ' ? 'text-[#e0453a]' : 'text-[#c8d2dd]'}>{f.victim}</span>
               </div>
             ))}
           </div>
 
           {/* crosshair */}
-          <div ref={xhRef} className="xh absolute left-1/2 top-1/2 z-10 h-0 w-0">
+          <div ref={xhRef} className="xh absolute left-1/2 top-1/2 z-10 h-0 w-0" style={{ display: scoped ? 'none' : undefined }}>
             <span className="xh-t" /><span className="xh-b" /><span className="xh-l" /><span className="xh-r" /><span className="xh-dot" />
           </div>
+          {/* AWP scope */}
+          {scoped && (
+            <div className="pointer-events-none absolute inset-0 z-10">
+              <div className="absolute inset-0" style={{ background: 'radial-gradient(circle at center, transparent 27.5%, rgba(4,7,9,0.985) 29%)' }} />
+              <div className="absolute left-1/2 top-0 h-full w-px -translate-x-1/2 bg-black/85" />
+              <div className="absolute left-0 top-1/2 h-px w-full -translate-y-1/2 bg-black/85" />
+              <div className="absolute left-1/2 top-1/2 h-2 w-2 -translate-x-1/2 -translate-y-1/2 rounded-full border border-black/70" />
+              <div className="absolute bottom-[16%] left-1/2 -translate-x-1/2 text-[10px] font-bold tracking-[0.3em] text-[#8b98a7]/70">
+                AWP · 4× ОПТИКА
+              </div>
+            </div>
+          )}
           {/* hitmarker */}
           <div ref={hitRef} className="hitmark absolute left-1/2 top-1/2 z-10 -ml-[11px] -mt-[11px]">
             <svg viewBox="0 0 22 22" className="h-[22px] w-[22px] stroke-current" strokeWidth="2.4" fill="none">
@@ -317,6 +352,20 @@ export default function App() {
             </div>
           )}
 
+          {/* weapon slots */}
+          <div className="absolute bottom-5 left-1/2 flex -translate-x-1/2 items-stretch gap-1 text-[11px] font-bold tracking-wider">
+            {[
+              { k: '1', n: 'AK-47' },
+              { k: '2', n: 'DEAGLE' },
+              { k: '3', n: 'AWP' },
+            ].map((s) => (
+              <div key={s.k} className="flex items-center gap-1.5 border border-[#2b3844] bg-[#12181f]/85 px-2.5 py-1 text-[#8b98a7]">
+                <span className="key">{s.k}</span>
+                <span ref={s.k === '1' ? slot1Ref : s.k === '2' ? slot2Ref : slot3Ref}>{s.n}</span>
+              </div>
+            ))}
+          </div>
+
           {/* bottom left: health / armor */}
           <div className="absolute bottom-5 left-5 w-[240px]">
             <div className="flex items-end gap-3 border border-[#2b3844] bg-[#12181f]/90 px-4 py-2.5">
@@ -349,7 +398,10 @@ export default function App() {
                 <span ref={magRef} className="font-display text-5xl leading-none">30</span>
                 <span ref={resRef} className="font-display text-lg leading-none text-[#8b98a7]">/ 90</span>
               </div>
-              <div className="mt-1 text-[10px] font-bold tracking-[0.3em] text-[#8b98a7]">AK-47 · 7.62</div>
+              <div className="mt-1 text-[10px] font-bold tracking-[0.3em] text-[#8b98a7]">
+                <span ref={weaponRef}>2·DEAGLE</span>
+                <span className="ml-2 text-[#5f6d7d]">[1][2][3] / КОЛЕСО</span>
+              </div>
             </div>
             <div className="mt-1.5 flex items-center justify-end gap-1.5 border border-[#2b3844] bg-[#12181f]/90 px-4 py-1.5 text-[#c9d68a]">
               <span className="mr-1 text-[10px] font-bold tracking-widest text-[#8b98a7]">ГРАНАТЫ</span>
@@ -360,7 +412,7 @@ export default function App() {
           {/* controls hint */}
           {hint && (
             <div className="absolute bottom-6 left-1/2 -translate-x-1/2 border border-[#2b3844] bg-[#12181f]/85 px-4 py-1.5 text-[11px] font-semibold tracking-wider text-[#8b98a7]">
-              WASD — движение · ведите мышь — обзор · ЛКМ — огонь · R — перезарядка · G — граната · ESC — пауза
+              WASD — движение · ЛКМ — огонь · 1/2/3 или колесо — оружие · ПКМ — оптика AWP · R — перезарядка · G — граната
             </div>
           )}
           {/* look-around hint */}
@@ -424,16 +476,18 @@ export default function App() {
                   <span><span className="key">G</span></span><span>граната</span>
                   <span><span className="key">SHIFT</span></span><span>тихий шаг — точность выше</span>
                   <span><span className="key">SPACE</span></span><span>прыжок</span>
+                  <span><span className="key">1</span><span className="key">2</span><span className="key">3</span></span><span>AK-47 / Deagle / AWP · колесо мыши тоже листает</span>
+                  <span><span className="key">ПКМ</span></span><span>оптика AWP ×4</span>
                   <span><span className="key">ESC</span></span><span>пауза</span>
                 </div>
               </div>
               <div className="border border-[#2b3844] bg-[#12181f]/95">
                 <div className="border-b border-[#2b3844] bg-[#182029] px-4 py-2 text-[11px] font-bold tracking-[0.3em] text-[#f2a33c]">БРИФИНГ</div>
                 <ul className="space-y-1.5 px-4 py-3 text-[12px] leading-relaxed text-[#aab6c4]">
-                  <li><span className="font-bold text-[#eae6dc]">Хедшот</span> — 100 урона, мгновенное устранение.</li>
-                  <li>Каждый фраг даёт <span className="font-bold text-[#eae6dc]">+30 патронов</span> и гранату в следующем раунде.</li>
-                  <li>Раунд — <span className="font-bold text-[#eae6dc]">1:40</span>. Не успели — раунд потерян.</li>
-                  <li>Матч до <span className="font-bold text-[#f2a33c]">3 побед</span>. Боты злеют с каждым раундом.</li>
+                  <li>Карта — <span className="font-bold text-[#f2a33c]">Dust II</span>: лонг A, мид с дверями, туннели на B.</li>
+                  <li>Все стволы сразу: <span className="key">1</span> AK-47 · <span className="key">2</span> Deagle · <span className="key">3</span> AWP — или колесо мыши.</li>
+                  <li><span className="font-bold text-[#eae6dc]">Хедшот</span> — урон ×4. AWP убивает с тела, <span className="key">ПКМ</span> — оптика.</li>
+                  <li>Матч до <span className="font-bold text-[#f2a33c]">3 побед</span>, раунд — 1:40. Боты злеют с каждым раундом.</li>
                 </ul>
               </div>
             </div>

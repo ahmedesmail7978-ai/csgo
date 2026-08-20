@@ -1,4 +1,8 @@
 import * as THREE from 'three'
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js'
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js'
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js'
+import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js'
 import { buildMap, collideMove, type MapData } from './map'
 import { Bot, type BotHooks } from './bots'
 import { SFX } from './audio'
@@ -6,6 +10,7 @@ import { SFX } from './audio'
 export interface HudData {
   hp: number; armor: number; mag: number; res: number; nades: number
   timer: number; spreadPx: number; enemies: number; reloading: boolean
+  weapon: string
 }
 export interface FeedEntry { id: number; killer: string; victim: string; head: boolean; byPlayer: boolean }
 export interface BannerData { title: string; sub?: string; tone: 'win' | 'lose' | 'info' }
@@ -23,6 +28,7 @@ export interface GameHooks {
   radar(d: RadarData): void
   over(o: OverData): void
   lockedChange(locked: boolean): void
+  scoped(s: boolean): void
 }
 
 type State = 'attract' | 'playing' | 'roundEnd' | 'dying' | 'paused'
@@ -30,7 +36,19 @@ type State = 'attract' | 'playing' | 'roundEnd' | 'dying' | 'paused'
 const NAMES = ['Феникс', 'Гюрза', 'Кобра', 'Шакал', 'Коршун', 'Таран', 'Волк', 'Гадюка', 'Беркут', 'Росомаха']
 const ROUND_TIME = 100
 const WINS_NEEDED = 3
-const MAG_SIZE = 30
+
+export type WeaponId = 'ak' | 'awp' | 'deagle'
+interface WeaponCfg {
+  name: string; dmg: number; cd: number; mag: number; res: number
+  auto: boolean; reload: number; recoil: number; recoilYaw: number
+  kick: number; base: number; grow: number; movePen: number; recover: number
+  speed: number; reward: number
+}
+const WEAPONS: Record<WeaponId, WeaponCfg> = {
+  ak:     { name: 'AK-47',  dmg: 27,  cd: 0.096, mag: 30, res: 90, auto: true,  reload: 1.9, recoil: 0.013, recoilYaw: 0.008, kick: 0.16, base: 0.0035, grow: 0.02,  movePen: 0.006, recover: 4.2, speed: 1.0,  reward: 300 },
+  awp:    { name: 'AWP',    dmg: 115, cd: 1.35,  mag: 5,  res: 30, auto: false, reload: 2.8, recoil: 0.09,  recoilYaw: 0.004, kick: 0.05, base: 0.0012, grow: 0.03,  movePen: 0,     recover: 1.1, speed: 0.88, reward: 100 },
+  deagle: { name: 'DEAGLE', dmg: 53,  cd: 0.24,  mag: 7,  res: 35, auto: false, reload: 1.7, recoil: 0.038, recoilYaw: 0.006, kick: 0.1,  base: 0.004,  grow: 0.05,  movePen: 0.035, recover: 2.4, speed: 1.02, reward: 300 },
+}
 
 interface Particle { m: THREE.Mesh; v: THREE.Vector3; g: number; life: number; max: number }
 interface Tracer { m: THREE.Mesh; life: number }
@@ -66,14 +84,21 @@ export class Game {
   private onGround = true
   private locked = false
   private hp = 100
-  private armor = 100
-  private mag = MAG_SIZE
-  private res = 90
+  private armor = 0
   private nades = 1
   private reloading = false
   private reloadT = 0
+  private reloadTotal = 1.9
   private cooldown = 0
   private firing = false
+
+  // weapons
+  private equipped: WeaponId = 'deagle'
+  private ammo: Record<WeaponId, { mag: number; res: number }> = {
+    ak: { mag: 30, res: 90 }, awp: { mag: 5, res: 30 }, deagle: { mag: 7, res: 35 },
+  }
+  private scoped = false
+  private switchAnim = 1
   private lastCX = 0
   private lastCY = 0
   private mouseInit = false
@@ -93,10 +118,14 @@ export class Game {
   private nadesFly: Nade[] = []
   private particles: Particle[] = []
   private tracers: Tracer[] = []
+  private shells: { m: THREE.Mesh; v: THREE.Vector3; rv: THREE.Vector3; life: number }[] = []
+  private decals: { m: THREE.Mesh; life: number }[] = []
+  private composer: EffectComposer
 
   // fx objects
   private weapon = new THREE.Group()
-  private muzzle = new THREE.Object3D()
+  private weaponModels: Record<WeaponId, THREE.Group> = { ak: new THREE.Group(), awp: new THREE.Group(), deagle: new THREE.Group() }
+  private weaponMuzzles: Record<WeaponId, THREE.Object3D> = { ak: new THREE.Object3D(), awp: new THREE.Object3D(), deagle: new THREE.Object3D() }
   private flash: THREE.Mesh
   private flashT = 0
   private gunLight: THREE.PointLight
@@ -118,6 +147,8 @@ export class Game {
     this.renderer.shadowMap.enabled = true
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap
     container.appendChild(this.renderer.domElement)
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping
+    this.renderer.toneMappingExposure = 1.06
 
     this.scene.background = new THREE.Color(0x93a9bc)
     this.scene.fog = new THREE.Fog(0xaeb9bd, 34, 95)
@@ -150,9 +181,9 @@ export class Game {
     this.boomLight = new THREE.PointLight(0xff9040, 0, 22, 2)
     this.scene.add(this.boomLight)
 
-    this.buildWeapon()
+    this.buildWeapons()
     this.flash = this.buildFlash(0.55)
-    this.muzzle.add(this.flash)
+    this.weaponMuzzles.deagle.add(this.flash)
 
     // pools
     for (let i = 0; i < 24; i++) {
@@ -165,6 +196,30 @@ export class Game {
       this.tracers.push({ m, life: 0 })
     }
 
+    // гильзы
+    const shellGeo = new THREE.BoxGeometry(0.016, 0.05, 0.016)
+    const shellMat = new THREE.MeshStandardMaterial({ color: 0xd9a441, metalness: 0.85, roughness: 0.35 })
+    for (let i = 0; i < 22; i++) {
+      const m = new THREE.Mesh(shellGeo, shellMat)
+      m.visible = false
+      this.scene.add(m)
+      this.shells.push({ m, v: new THREE.Vector3(), rv: new THREE.Vector3(), life: 0 })
+    }
+    // декали попаданий
+    const decalGeo = new THREE.PlaneGeometry(0.1, 0.1)
+    for (let i = 0; i < 40; i++) {
+      const m = new THREE.Mesh(decalGeo, new THREE.MeshBasicMaterial({ color: 0x14100a, transparent: true, opacity: 0, depthWrite: false }))
+      m.visible = false
+      this.scene.add(m)
+      this.decals.push({ m, life: 0 })
+    }
+
+    // постобработка: bloom + тонмаппинг
+    this.composer = new EffectComposer(this.renderer)
+    this.composer.addPass(new RenderPass(this.scene, this.camera))
+    this.composer.addPass(new UnrealBloomPass(new THREE.Vector2(container.clientWidth, container.clientHeight), 0.5, 0.5, 0.82))
+    this.composer.addPass(new OutputPass())
+
     this.pos.set(this.map.playerSpawn.x, 0, this.map.playerSpawn.z)
     this.bindEvents()
     this.loop()
@@ -172,32 +227,93 @@ export class Game {
 
   /* ================= weapon ================= */
 
-  private buildWeapon() {
-    const w = this.weapon
+  private buildWeapons() {
+    const root = this.weapon
     const metal = new THREE.MeshStandardMaterial({ color: 0x26282c, roughness: 0.5, metalness: 0.65 })
+    const darkMetal = new THREE.MeshStandardMaterial({ color: 0x1b1d20, roughness: 0.4, metalness: 0.75 })
     const wood = new THREE.MeshStandardMaterial({ color: 0x7c4a24, roughness: 0.75, metalness: 0.1 })
-    const box = (bw: number, bh: number, bd: number, m: THREE.Material, x: number, y: number, z: number, rx = 0) => {
+    const awpGreen = new THREE.MeshStandardMaterial({ color: 0x42503a, roughness: 0.7, metalness: 0.25 })
+
+    // ---- AK-47 ----
+    const ak = this.weaponModels.ak
+    const akBox = (bw: number, bh: number, bd: number, m: THREE.Material, x: number, y: number, z: number, rx = 0) => {
       const mesh = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, bd), m)
       mesh.position.set(x, y, z)
       mesh.rotation.x = rx
-      w.add(mesh)
-      return mesh
+      ak.add(mesh)
     }
-    box(0.075, 0.095, 0.5, metal, 0, 0, -0.04)                    // receiver
-    const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.016, 0.016, 0.36, 10), metal)
-    barrel.rotation.x = Math.PI / 2
-    barrel.position.set(0, 0.022, -0.46)
-    w.add(barrel)
-    box(0.068, 0.072, 0.24, wood, 0, -0.004, -0.28)               // handguard
-    box(0.03, 0.03, 0.3, metal, 0, 0.062, -0.32)                  // gas tube
-    box(0.058, 0.2, 0.1, metal, 0, -0.16, 0.03, 0.22)             // magazine
-    box(0.06, 0.085, 0.24, wood, 0, -0.012, 0.3)                  // stock
-    box(0.012, 0.05, 0.012, metal, 0, 0.078, -0.6)                // front sight
-    box(0.05, 0.03, 0.02, metal, 0, 0.062, 0.1)                   // rear sight
-    this.muzzle.position.set(0, 0.022, -0.66)
-    w.add(this.muzzle)
-    w.position.set(0.24, -0.22, -0.45)
-    this.camera.add(w)
+    akBox(0.075, 0.095, 0.5, metal, 0, 0, -0.04)
+    const akBarrel = new THREE.Mesh(new THREE.CylinderGeometry(0.016, 0.016, 0.36, 10), metal)
+    akBarrel.rotation.x = Math.PI / 2
+    akBarrel.position.set(0, 0.022, -0.46)
+    ak.add(akBarrel)
+    akBox(0.068, 0.072, 0.24, wood, 0, -0.004, -0.28)
+    akBox(0.03, 0.03, 0.3, metal, 0, 0.062, -0.32)
+    akBox(0.058, 0.2, 0.1, metal, 0, -0.16, 0.03, 0.22)
+    akBox(0.06, 0.085, 0.24, wood, 0, -0.012, 0.3)
+    akBox(0.012, 0.05, 0.012, metal, 0, 0.078, -0.6)
+    akBox(0.05, 0.03, 0.02, metal, 0, 0.062, 0.1)
+    this.weaponMuzzles.ak.position.set(0, 0.022, -0.66)
+    ak.add(this.weaponMuzzles.ak)
+
+    // ---- Desert Eagle ----
+    const de = this.weaponModels.deagle
+    const deBox = (bw: number, bh: number, bd: number, m: THREE.Material, x: number, y: number, z: number, rx = 0) => {
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, bd), m)
+      mesh.position.set(x, y, z)
+      mesh.rotation.x = rx
+      de.add(mesh)
+    }
+    deBox(0.052, 0.062, 0.3, darkMetal, 0, 0.02, -0.02)           // slide
+    deBox(0.046, 0.05, 0.26, metal, 0, -0.03, -0.02)               // frame
+    deBox(0.048, 0.15, 0.07, darkMetal, 0, -0.12, 0.09, -0.22)     // grip
+    deBox(0.02, 0.05, 0.05, metal, 0, -0.065, 0.02)                // trigger guard
+    deBox(0.014, 0.03, 0.014, metal, 0, 0.062, -0.12)              // front sight
+    deBox(0.04, 0.02, 0.016, metal, 0, 0.058, 0.11)                // rear sight
+    const deBarrel = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, 0.07, 10), darkMetal)
+    deBarrel.rotation.x = Math.PI / 2
+    deBarrel.position.set(0, 0.02, -0.19)
+    de.add(deBarrel)
+    this.weaponMuzzles.deagle.position.set(0, 0.02, -0.24)
+    de.add(this.weaponMuzzles.deagle)
+
+    // ---- AWP ----
+    const aw = this.weaponModels.awp
+    const awBox = (bw: number, bh: number, bd: number, m: THREE.Material, x: number, y: number, z: number, rx = 0) => {
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, bd), m)
+      mesh.position.set(x, y, z)
+      mesh.rotation.x = rx
+      aw.add(mesh)
+    }
+    awBox(0.06, 0.085, 0.62, awpGreen, 0, 0, 0)                    // receiver
+    const awBarrel = new THREE.Mesh(new THREE.CylinderGeometry(0.014, 0.014, 0.52, 10), darkMetal)
+    awBarrel.rotation.x = Math.PI / 2
+    awBarrel.position.set(0, 0.015, -0.56)
+    aw.add(awBarrel)
+    awBox(0.034, 0.034, 0.1, darkMetal, 0, 0.015, -0.85)           // muzzle brake
+    const scope = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.24, 12), darkMetal)
+    scope.rotation.x = Math.PI / 2
+    scope.position.set(0, 0.085, -0.06)
+    aw.add(scope)
+    const scopeEye = new THREE.Mesh(new THREE.CylinderGeometry(0.036, 0.03, 0.05, 12), metal)
+    scopeEye.rotation.x = Math.PI / 2
+    scopeEye.position.set(0, 0.085, 0.08)
+    aw.add(scopeEye)
+    awBox(0.012, 0.04, 0.012, metal, 0, 0.045, -0.06)              // scope mount
+    awBox(0.055, 0.11, 0.24, awpGreen, 0, -0.015, 0.42)            // stock
+    awBox(0.05, 0.05, 0.1, awpGreen, 0, 0.055, 0.34)               // cheek rest
+    awBox(0.05, 0.12, 0.08, darkMetal, 0, -0.1, 0.04, 0.1)         // magazine
+    awBox(0.05, 0.06, 0.08, awpGreen, 0, -0.06, -0.28)             // foregrip
+    awBox(0.014, 0.045, 0.014, metal, 0, 0.045, 0.3)               // bolt handle
+    this.weaponMuzzles.awp.position.set(0, 0.015, -0.92)
+    aw.add(this.weaponMuzzles.awp)
+
+    for (const id of ['ak', 'awp', 'deagle'] as WeaponId[]) root.add(this.weaponModels[id])
+    this.weaponModels.ak.visible = false
+    this.weaponModels.awp.visible = false
+    this.weaponModels.deagle.visible = true
+    root.position.set(0.24, -0.22, -0.45)
+    this.camera.add(root)
   }
 
   private buildFlash(size: number): THREE.Mesh {
@@ -223,8 +339,18 @@ export class Game {
     if (e.code === 'Escape' && !this.locked) { this.pause(); return }
     if (e.code === 'KeyR') this.startReload()
     if (e.code === 'KeyG') this.throwNade()
+    if (e.code === 'Digit1') this.switchTo('ak')
+    if (e.code === 'Digit2') this.switchTo('deagle')
+    if (e.code === 'Digit3') this.switchTo('awp')
   }
   private onKeyUp = (e: KeyboardEvent) => { this.keys[e.code] = false }
+  private onWheel = (e: WheelEvent) => {
+    if (this.state !== 'playing') return
+    const order: WeaponId[] = ['ak', 'deagle', 'awp']
+    const i = order.indexOf(this.equipped)
+    const n = order.length
+    this.switchTo(order[(i + (e.deltaY > 0 ? 1 : n - 1)) % n])
+  }
 
   private onMouseMove = (e: MouseEvent) => {
     if (this.state !== 'playing') return
@@ -259,8 +385,12 @@ export class Game {
       this.tryShoot()
       if (!this.locked) this.requestLock()
     } else if (e.button === 2) {
-      this.firing = true
-      this.tryShoot()
+      // ПКМ: прицел AWP, иначе огонь
+      if (this.equipped === 'awp') this.toggleScope()
+      else {
+        this.firing = true
+        this.tryShoot()
+      }
     }
   }
   private onMouseUp = (e: MouseEvent) => {
@@ -280,6 +410,7 @@ export class Game {
     this.camera.aspect = w / h
     this.camera.updateProjectionMatrix()
     this.renderer.setSize(w, h)
+    this.composer.setSize(w, h)
   }
   private onVisibility = () => {
     if (document.hidden && this.state === 'playing') this.pause()
@@ -289,6 +420,7 @@ export class Game {
   private bindEvents() {
     window.addEventListener('keydown', this.onKeyDown)
     window.addEventListener('keyup', this.onKeyUp)
+    window.addEventListener('wheel', this.onWheel, { passive: true })
     window.addEventListener('resize', this.onResize)
     document.addEventListener('mousemove', this.onMouseMove)
     document.addEventListener('mousedown', this.onMouseDown)
@@ -314,6 +446,8 @@ export class Game {
     this.round = 0
     this.kills = 0
     this.deaths = 0
+    this.equipped = 'deagle'
+    this.applyWeaponVisibility()
     this.hooks.score(0, 0)
     this.hooks.kills(0)
     this.startRound()
@@ -330,6 +464,7 @@ export class Game {
     this.state = 'paused'
     this.firing = false
     this.mouseInit = false
+    if (this.scoped) this.toggleScope(false)
     if (document.pointerLockElement) document.exitPointerLock()
     else this.hooks.lockedChange(false)
   }
@@ -338,6 +473,7 @@ export class Game {
     window.clearTimeout(this.roundTimeout)
     this.clearEntities()
     this.state = 'attract'
+    if (this.scoped) this.toggleScope(false)
     if (document.pointerLockElement) document.exitPointerLock()
   }
 
@@ -345,6 +481,7 @@ export class Game {
     cancelAnimationFrame(this.raf)
     window.removeEventListener('keydown', this.onKeyDown)
     window.removeEventListener('keyup', this.onKeyUp)
+    window.removeEventListener('wheel', this.onWheel)
     window.removeEventListener('resize', this.onResize)
     document.removeEventListener('mousemove', this.onMouseMove)
     document.removeEventListener('mousedown', this.onMouseDown)
@@ -381,11 +518,15 @@ export class Game {
     this.kick = 0
     this.hp = 100
     this.armor = 100
-    this.mag = MAG_SIZE
-    this.res = 90
+    // каждый раунд — полный боезапас всех стволов
+    for (const id of ['ak', 'awp', 'deagle'] as WeaponId[]) {
+      this.ammo[id] = { mag: WEAPONS[id].mag, res: WEAPONS[id].res }
+    }
     this.nades = Math.min(3, this.round)
     this.reloading = false
     this.firing = false
+    this.scoped = false
+    this.hooks.scoped(false)
     this.roundT = ROUND_TIME
 
     const count = Math.min(8, 2 + this.round)
@@ -413,7 +554,7 @@ export class Game {
     const need = WINS_NEEDED - this.scoreA
     this.hooks.banner({
       title: `РАУНД ${this.round}`,
-      sub: `противников: ${count} · до победы: ${need}`,
+      sub: `противников: ${count} · стволы: [1][2][3] / колесо`,
       tone: 'info',
     })
     this.sfx.beep(760, 0.12, 0.22)
@@ -424,6 +565,9 @@ export class Game {
     if (this.state !== 'playing' && this.state !== 'dying') return
     this.state = 'roundEnd'
     this.firing = false
+    if (this.scoped) this.toggleScope(false)
+    this.camera.fov = 75
+    this.camera.updateProjectionMatrix()
     if (won) this.scoreA++
     else this.scoreB++
     this.hooks.score(this.scoreA, this.scoreB)
@@ -443,6 +587,9 @@ export class Game {
   }
 
   private finish(victory: boolean) {
+    if (this.scoped) this.toggleScope(false)
+    this.camera.fov = 75
+    this.camera.updateProjectionMatrix()
     this.hooks.over({
       result: victory ? 'victory' : 'defeat',
       kills: this.kills,
@@ -457,42 +604,57 @@ export class Game {
   /* ================= combat ================= */
 
   private startReload() {
-    if (this.reloading || this.mag >= MAG_SIZE || this.state !== 'playing') return
-    if (this.res <= 0) {
-      this.res = 30
-      this.hooks.feed({ killer: 'Снабжение', victim: '+30 патронов', head: false, byPlayer: true })
+    const cfg = WEAPONS[this.equipped]
+    const a = this.ammo[this.equipped]
+    if (this.reloading || a.mag >= cfg.mag || this.state !== 'playing') return
+    if (a.res <= 0) {
+      a.res = cfg.mag
+      this.hooks.feed({ killer: 'Снабжение', victim: `+${cfg.mag} патронов`, head: false, byPlayer: true })
     }
+    if (this.scoped) this.toggleScope(false)
     this.reloading = true
-    this.reloadT = 1.9
+    this.reloadTotal = cfg.reload
+    this.reloadT = cfg.reload
     this.sfx.reload()
   }
 
   private tryShoot() {
-    if (this.state !== 'playing' || this.cooldown > 0 || this.reloading) return
-    if (this.mag <= 0) {
+    if (this.state !== 'playing' || this.cooldown > 0 || this.reloading || this.switchAnim < 1) return
+    const cfg = WEAPONS[this.equipped]
+    const a = this.ammo[this.equipped]
+    if (a.mag <= 0) {
       this.sfx.dry()
       this.firing = false
       this.startReload()
       return
     }
-    this.mag--
-    this.cooldown = 0.096
-    this.sfx.shoot()
+    a.mag--
+    this.cooldown = cfg.cd
+    if (this.equipped === 'awp') this.sfx.sniper()
+    else if (this.equipped === 'deagle') this.sfx.pistol()
+    else this.sfx.shoot()
 
     // fx
-    this.flashT = 0.04
+    this.flashT = this.equipped === 'awp' ? 0.07 : 0.04
     this.flash.rotation.z = Math.random() * Math.PI
-    const fs = 0.75 + Math.random() * 0.5
+    const fs = (this.equipped === 'awp' ? 1.2 : 0.75) + Math.random() * 0.5
     this.flash.scale.set(fs, fs, fs)
-    this.gunLight.intensity = 26
+    this.gunLight.intensity = this.equipped === 'awp' ? 40 : 26
     this.kick = Math.min(1.6, this.kick + 1)
-    this.recoilPitch += 0.013 + Math.random() * 0.008
-    this.recoilYaw += (Math.random() - 0.5) * 0.01
-    this.spread = Math.min(1, this.spread + (this.onGround ? 0.16 : 0.26))
+    this.recoilPitch += cfg.recoil + Math.random() * cfg.recoil * 0.5
+    this.recoilYaw += (Math.random() - 0.5) * cfg.recoilYaw * 2
+    this.spread = Math.min(1, this.spread + (this.onGround ? cfg.kick : cfg.kick * 1.6))
+    this.spawnShell()
 
     // hitscan
     this.camera.getWorldDirection(this.tmpD)
-    const spreadRad = 0.0035 + this.spread * 0.02
+    const hSpeed = Math.hypot(this.vel.x, this.vel.z)
+    let spreadRad: number
+    if (this.equipped === 'awp') {
+      spreadRad = this.scoped ? 0.0012 + this.spread * 0.004 : 0.075 + this.spread * 0.03 + (hSpeed > 1.2 ? 0.05 : 0)
+    } else {
+      spreadRad = cfg.base + this.spread * cfg.grow + (hSpeed > 1.2 ? cfg.movePen : 0) + (this.onGround ? 0 : 0.012)
+    }
     this.tmpD.x += (Math.random() - 0.5) * 2 * spreadRad
     this.tmpD.y += (Math.random() - 0.5) * 2 * spreadRad
     this.tmpD.z += (Math.random() - 0.5) * 2 * spreadRad
@@ -506,15 +668,16 @@ export class Game {
     const hits = this.ray.intersectObjects(targets, false)
 
     const muzzlePos = new THREE.Vector3()
-    this.muzzle.getWorldPosition(muzzlePos)
+    this.weaponMuzzles[this.equipped].getWorldPosition(muzzlePos)
     const end = hits.length ? hits[0].point : this.tmpV.clone().addScaledVector(this.tmpD, 120)
     this.spawnTracer(muzzlePos, end, 0xffd27a)
+    this.burst(muzzlePos, 0x9c9a90, 2, 0.6, 0.6, -2.2) // пороховой дым
 
     if (hits.length) {
       const ud = hits[0].object.userData as { bot?: Bot; part?: string }
       if (ud.bot && ud.bot.alive) {
         const head = ud.part === 'head'
-        const killed = ud.bot.hit(ud.part || 'body', head ? 100 : 26)
+        const killed = ud.bot.hit(ud.part || 'body', head ? cfg.dmg * 4 : cfg.dmg)
         this.burst(hits[0].point, 0x9e1b1b, head ? 16 : 10, 3.4, 0.5)
         if (killed) {
           this.onBotKilled(ud.bot, head)
@@ -525,13 +688,16 @@ export class Game {
       } else {
         this.burst(hits[0].point, 0xd8c08a, 7, 2.6, 0.35)
         this.burst(hits[0].point, 0xfff0b8, 4, 3.4, 0.25)
+        if (hits[0].face) {
+          const nrm = new THREE.Vector3().copy(hits[0].face.normal).transformDirection(hits[0].object.matrixWorld)
+          this.addDecal(hits[0].point, nrm)
+        }
       }
     }
   }
 
   private onBotKilled(bot: Bot, head: boolean) {
     this.kills++
-    this.res = Math.min(120, this.res + 30)
     this.hooks.kills(this.kills)
     this.hooks.hitmark('kill')
     this.hooks.feed({ killer: 'ВЫ', victim: bot.name, head, byPlayer: true })
@@ -572,6 +738,62 @@ export class Game {
     while (a > Math.PI) a -= Math.PI * 2
     while (a < -Math.PI) a += Math.PI * 2
     return a
+  }
+
+  /* ================= weapons & shop ================= */
+
+  private switchTo(w: WeaponId) {
+    if (this.equipped === w || this.state !== 'playing') return
+    this.equipped = w
+    this.reloading = false
+    this.firing = false
+    if (this.scoped) this.toggleScope(false)
+    this.switchAnim = 0
+    this.applyWeaponVisibility()
+    this.sfx.switchW()
+  }
+
+  private applyWeaponVisibility() {
+    this.weaponModels.ak.visible = this.equipped === 'ak'
+    this.weaponModels.awp.visible = this.equipped === 'awp'
+    this.weaponModels.deagle.visible = this.equipped === 'deagle'
+    this.weaponMuzzles[this.equipped].add(this.flash)
+  }
+
+  private toggleScope(on?: boolean) {
+    if (this.equipped !== 'awp' && on !== false) return
+    const next = on !== undefined ? on : !this.scoped
+    if (next === this.scoped) return
+    this.scoped = next
+    this.spread = Math.min(this.spread, 0.15)
+    this.sfx.zoom(next)
+    this.hooks.scoped(next)
+  }
+
+  private spawnShell() {
+    const s = this.shells.find((q) => q.life <= 0)
+    if (!s) return
+    s.m.visible = true
+    this.camera.getWorldPosition(this.tmpV)
+    const right = new THREE.Vector3(1, 0, 0).applyQuaternion(this.camera.quaternion)
+    const up = new THREE.Vector3(0, 1, 0).applyQuaternion(this.camera.quaternion)
+    const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion)
+    s.m.position.copy(this.tmpV).addScaledVector(right, 0.22).addScaledVector(up, -0.1).addScaledVector(fwd, 0.2)
+    s.v.copy(right).multiplyScalar(1.6 + Math.random() * 1.2).addScaledVector(up, 1.6 + Math.random() * 1.4).addScaledVector(fwd, 0.5)
+    s.rv.set((Math.random() - 0.5) * 25, (Math.random() - 0.5) * 25, (Math.random() - 0.5) * 25)
+    s.life = 1.1
+  }
+
+  private addDecal(point: THREE.Vector3, normal: THREE.Vector3) {
+    const d = this.decals.find((q) => q.life <= 0)
+    if (!d) return
+    d.m.position.copy(point).addScaledVector(normal, 0.015)
+    d.m.lookAt(this.tmpV.copy(point).add(normal))
+    d.m.rotation.z = Math.random() * Math.PI
+    const sc = 0.7 + Math.random() * 0.9
+    d.m.scale.set(sc, sc, sc)
+    d.m.visible = true
+    d.life = 7
   }
 
   /* ================= grenade ================= */
@@ -707,6 +929,31 @@ export class Game {
       if (p.m.position.y < 0.02) { p.m.position.y = 0.02; p.v.y = Math.abs(p.v.y) * 0.3; p.v.x *= 0.7; p.v.z *= 0.7 }
       ;(p.m.material as THREE.MeshBasicMaterial).opacity = Math.min(1, p.life / p.max * 1.4)
     }
+    // гильзы
+    for (const s of this.shells) {
+      if (s.life <= 0) continue
+      s.life -= dt
+      if (s.life <= 0) { s.m.visible = false; continue }
+      s.v.y -= 13 * dt
+      s.m.position.addScaledVector(s.v, dt)
+      if (s.m.position.y < 0.02) {
+        s.m.position.y = 0.02
+        s.v.y = Math.abs(s.v.y) * 0.35
+        s.v.x *= 0.6
+        s.v.z *= 0.6
+        s.rv.multiplyScalar(0.5)
+      }
+      s.m.rotation.x += s.rv.x * dt
+      s.m.rotation.y += s.rv.y * dt
+      s.m.rotation.z += s.rv.z * dt
+    }
+    // декали попаданий
+    for (const d of this.decals) {
+      if (d.life <= 0) continue
+      d.life -= dt
+      if (d.life <= 0) { d.m.visible = false; continue }
+      ;(d.m.material as THREE.MeshBasicMaterial).opacity = Math.min(0.7, d.life * 0.5)
+    }
     // tracers
     for (const t of this.tracers) {
       if (t.life <= 0) continue
@@ -749,6 +996,8 @@ export class Game {
 
     const dust = this.scene.getObjectByName('dust')
     if (dust) dust.rotation.y += dt * 0.012
+    const clouds = this.scene.getObjectByName('clouds')
+    if (clouds) clouds.rotation.y += dt * 0.007
 
     if (this.state === 'attract') {
       this.attractT += dt * 0.09
@@ -772,7 +1021,7 @@ export class Game {
       el.style.cursor = wantCursor
     }
 
-    this.renderer.render(this.scene, this.camera)
+    this.composer.render()
   }
 
   private updateDying(dt: number) {
@@ -787,7 +1036,8 @@ export class Game {
     const f = (this.keys['KeyW'] ? 1 : 0) - (this.keys['KeyS'] ? 1 : 0)
     const s = (this.keys['KeyD'] ? 1 : 0) - (this.keys['KeyA'] ? 1 : 0)
     const walk = !!this.keys['ShiftLeft'] || !!this.keys['ShiftRight']
-    const speed = walk ? 2.6 : 5.7
+    const wcfg = WEAPONS[this.equipped]
+    const speed = (walk ? 2.6 : 5.7) * wcfg.speed * (this.scoped ? 0.42 : 1)
     const sin = Math.sin(this.yaw)
     const cos = Math.cos(this.yaw)
     let wx = -sin * f + cos * s
@@ -826,33 +1076,46 @@ export class Game {
     this.camera.position.set(this.pos.x + shX, this.pos.y + 1.55 + bob + shY, this.pos.z)
     this.camera.rotation.set(this.pitch + this.recoilPitch + shY * 0.4, this.yaw + this.recoilYaw, shR)
 
+    // scope fov
+    const targetFov = this.scoped ? 18 : 75
+    if (Math.abs(this.camera.fov - targetFov) > 0.05) {
+      this.camera.fov += (targetFov - this.camera.fov) * Math.min(1, 16 * dt)
+      this.camera.updateProjectionMatrix()
+    }
+
     // weapon anim
     const w = this.weapon
+    w.visible = !this.scoped
+    const dip = Math.sin(Math.min(1, this.switchAnim) * Math.PI) * (this.switchAnim >= 1 ? 0 : 0.16)
     const targetX = 0.24 + Math.sin(this.bobT) * 0.006 * Math.min(1, hSpeed / 5) - this.vel.x * 0.004 * cos - this.vel.z * 0.004 * -sin
     w.position.x += (targetX - w.position.x) * Math.min(1, 12 * dt)
-    w.position.y = -0.22 + Math.abs(Math.cos(this.bobT)) * 0.008 * Math.min(1, hSpeed / 5)
+    w.position.y = -0.22 + Math.abs(Math.cos(this.bobT)) * 0.008 * Math.min(1, hSpeed / 5) - dip
     w.position.z = -0.45 + this.kick * 0.055
     let rotX = this.kick * 0.1
-    if (this.reloading) rotX -= Math.sin(Math.min(1, 1 - this.reloadT / 1.9) * Math.PI) * 0.85
+    if (this.reloading) rotX -= Math.sin(Math.min(1, 1 - this.reloadT / this.reloadTotal) * Math.PI) * 0.85
+    if (this.switchAnim < 1) rotX -= Math.sin(this.switchAnim * Math.PI) * 0.5
     w.rotation.x = rotX
     w.rotation.z = this.kick * 0.02
 
     // spread
     const moving = hSpeed > 1.2
-    this.spread = Math.max(0, this.spread - dt * (moving ? 1.4 : 4.2) - (this.onGround && !moving ? dt * 1.5 : 0) - (walk ? dt * 0.8 : 0))
+    this.spread = Math.max(0, this.spread - dt * wcfg.recover * (moving ? 0.45 : 1) - (this.onGround && !moving ? dt * 1.2 : 0))
 
     // timers
+    const cfg = WEAPONS[this.equipped]
     this.cooldown = Math.max(0, this.cooldown - dt)
+    this.switchAnim = Math.min(1, this.switchAnim + dt / 0.28)
     if (this.reloading) {
       this.reloadT -= dt
       if (this.reloadT <= 0) {
         this.reloading = false
-        const take = Math.min(MAG_SIZE - this.mag, this.res)
-        this.mag += take
-        this.res -= take
+        const a = this.ammo[this.equipped]
+        const take = Math.min(cfg.mag - a.mag, a.res)
+        a.mag += take
+        a.res -= take
       }
     }
-    if (this.firing) this.tryShoot()
+    if (this.firing && cfg.auto) this.tryShoot()
 
     // ---- bots ----
     const eye = this.tmpV.set(this.pos.x, this.pos.y + 1.55, this.pos.z)
@@ -898,16 +1161,18 @@ export class Game {
     }
 
     // ---- hud ----
+    const ammoNow = this.ammo[this.equipped]
     this.hooks.hud({
       hp: Math.max(0, Math.ceil(this.hp)),
       armor: Math.max(0, Math.ceil(this.armor)),
-      mag: this.mag,
-      res: this.res,
+      mag: ammoNow.mag,
+      res: ammoNow.res,
       nades: this.nades,
       timer: Math.max(0, Math.ceil(this.roundT)),
-      spreadPx: Math.round(5 + this.spread * 30 + (moving ? 4 : 0)),
+      spreadPx: Math.round(this.scoped ? 2 : 5 + this.spread * 30 + (moving ? 4 : 0)),
       enemies: alive,
       reloading: this.reloading,
+      weapon: `${this.equipped === 'ak' ? '1' : this.equipped === 'deagle' ? '2' : '3'}·${WEAPONS[this.equipped].name}`,
     })
     this.hooks.radar({
       px: this.pos.x,
