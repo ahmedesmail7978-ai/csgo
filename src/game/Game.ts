@@ -10,14 +10,17 @@ import { SFX } from './audio'
 export interface HudData {
   hp: number; armor: number; mag: number; res: number; nades: number
   timer: number; spreadPx: number; enemies: number; reloading: boolean
-  weapon: string
+  weapon: string; melee: boolean
 }
 export interface FeedEntry { id: number; killer: string; victim: string; head: boolean; byPlayer: boolean }
 export interface BannerData { title: string; sub?: string; tone: 'win' | 'lose' | 'info' }
 export interface OverData { result: 'victory' | 'defeat'; kills: number; deaths: number; won: number; lost: number }
 export interface RadarData { px: number; pz: number; yaw: number; dots: { x: number; z: number }[] }
+export interface WheelItem { id: WeaponId; name: string; short: string; cat: string }
+export interface WheelState { items: WheelItem[]; active: number }
 
 export interface GameHooks {
+  wheel(w: WheelState | null): void
   hud(h: HudData): void
   score(a: number, b: number): void
   kills(k: number): void
@@ -37,18 +40,106 @@ const NAMES = ['Феникс', 'Гюрза', 'Кобра', 'Шакал', 'Кор
 const ROUND_TIME = 100
 const WINS_NEEDED = 3
 
-export type WeaponId = 'ak' | 'awp' | 'deagle'
-interface WeaponCfg {
-  name: string; dmg: number; cd: number; mag: number; res: number
+export const IS_TOUCH =
+  typeof window !== 'undefined' &&
+  (window.matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window)
+
+export type WeaponId = 'ak' | 'awp' | 'deagle' | 'p90' | 'knife'
+
+export type SoundKind = 'pistol' | 'smg' | 'rifle' | 'sniper' | 'knife'
+
+export interface GunSpec {
+  body: [number, number, number]       // приёмник: ширина, высота, длина
+  bodyMat: 'metal' | 'poly' | 'wood'
+  bodyColor: number
+  barrelLen: number; barrelR: number; barrelY?: number
+  handguard?: [number, number, number]; handguardMat?: 'wood' | 'poly'
+  stock?: { l: number; drop: number; mat: 'wood' | 'poly'; color: number }
+  scope?: { len: number; r: number; zoom: number }
+  mag?: { w: number; h: number; d: number; tilt: number; x?: number; y?: number; z?: number }
+  grip?: boolean
+  gasTube?: boolean
+  boltHandle?: boolean
+  bipod?: boolean
+  serrations?: boolean
+  topMag?: boolean
+  bullpup?: boolean
+  muzzle?: { len: number; r: number }
+  pistol?: boolean
+  slideColor?: number
+  melee?: boolean
+  blade?: { len: number; w: number }
+}
+
+interface WeaponDef {
+  name: string; short: string; cat: string
+  dmg: number; cd: number; mag: number; res: number
   auto: boolean; reload: number; recoil: number; recoilYaw: number
   kick: number; base: number; grow: number; movePen: number; recover: number
-  speed: number; reward: number
+  speed: number; reward: number; sound: SoundKind; melee?: boolean; gun: GunSpec
 }
-const WEAPONS: Record<WeaponId, WeaponCfg> = {
-  ak:     { name: 'AK-47',  dmg: 27,  cd: 0.096, mag: 30, res: 90, auto: true,  reload: 1.9, recoil: 0.013, recoilYaw: 0.008, kick: 0.16, base: 0.0035, grow: 0.02,  movePen: 0.006, recover: 4.2, speed: 1.0,  reward: 300 },
-  awp:    { name: 'AWP',    dmg: 115, cd: 1.35,  mag: 5,  res: 30, auto: false, reload: 2.8, recoil: 0.09,  recoilYaw: 0.004, kick: 0.05, base: 0.0012, grow: 0.03,  movePen: 0,     recover: 1.1, speed: 0.88, reward: 100 },
-  deagle: { name: 'DEAGLE', dmg: 53,  cd: 0.24,  mag: 7,  res: 35, auto: false, reload: 1.7, recoil: 0.038, recoilYaw: 0.006, kick: 0.1,  base: 0.004,  grow: 0.05,  movePen: 0.035, recover: 2.4, speed: 1.02, reward: 300 },
+
+const WEAPONS: Record<WeaponId, WeaponDef> = {
+  ak: {
+    name: 'AK-47', short: 'AK-47', cat: 'Винтовка', dmg: 27, cd: 0.096, mag: 30, res: 90,
+    auto: true, reload: 2.5, recoil: 0.013, recoilYaw: 0.008, kick: 0.16, base: 0.0035, grow: 0.02,
+    movePen: 0.006, recover: 4.2, speed: 1.0, reward: 300, sound: 'rifle',
+    gun: {
+      body: [0.072, 0.092, 0.5], bodyMat: 'metal', bodyColor: 0x3a3d42,
+      barrelLen: 0.3, barrelR: 0.016, barrelY: 0.022,
+      handguard: [0.066, 0.07, 0.24], handguardMat: 'wood',
+      stock: { l: 0.24, drop: 0.02, mat: 'wood', color: 0x8a5a2c },
+      mag: { w: 0.056, h: 0.2, d: 0.1, tilt: 0.24, z: 0.04 },
+      grip: true, gasTube: true, muzzle: { len: 0.07, r: 0.02 },
+    },
+  },
+  awp: {
+    name: 'AWP', short: 'AWP', cat: 'Снайперка', dmg: 115, cd: 1.35, mag: 5, res: 30,
+    auto: false, reload: 3.7, recoil: 0.09, recoilYaw: 0.004, kick: 0.05, base: 0.0012, grow: 0.03,
+    movePen: 0, recover: 1.1, speed: 0.88, reward: 100, sound: 'sniper',
+    gun: {
+      body: [0.06, 0.088, 0.6], bodyMat: 'poly', bodyColor: 0x4a563f,
+      barrelLen: 0.5, barrelR: 0.014, barrelY: 0.015,
+      stock: { l: 0.26, drop: 0.035, mat: 'poly', color: 0x4a563f },
+      scope: { len: 0.26, r: 0.03, zoom: 4 },
+      mag: { w: 0.05, h: 0.11, d: 0.08, tilt: 0.08, z: 0.02 },
+      grip: true, bipod: true, boltHandle: true, muzzle: { len: 0.1, r: 0.024 },
+    },
+  },
+  deagle: {
+    name: 'Desert Eagle', short: 'DEAGLE', cat: 'Пистолет', dmg: 53, cd: 0.24, mag: 7, res: 35,
+    auto: false, reload: 2.2, recoil: 0.038, recoilYaw: 0.006, kick: 0.1, base: 0.004, grow: 0.05,
+    movePen: 0.035, recover: 2.4, speed: 1.02, reward: 300, sound: 'pistol',
+    gun: {
+      body: [0.046, 0.05, 0.26], bodyMat: 'metal', bodyColor: 0x9ba1a8,
+      barrelLen: 0.05, barrelR: 0.013, barrelY: 0.02,
+      pistol: true, slideColor: 0xc9ced4, serrations: true,
+      mag: { w: 0.04, h: 0.02, d: 0.06, tilt: -0.22, z: 0.1 },
+    },
+  },
+  p90: {
+    name: 'P90', short: 'P90', cat: 'ПП', dmg: 14, cd: 0.066, mag: 50, res: 100,
+    auto: true, reload: 3.3, recoil: 0.008, recoilYaw: 0.007, kick: 0.07, base: 0.005, grow: 0.016,
+    movePen: 0.013, recover: 3.8, speed: 1.04, reward: 600, sound: 'smg',
+    gun: {
+      body: [0.068, 0.11, 0.5], bodyMat: 'poly', bodyColor: 0x5d6844,
+      barrelLen: 0.14, barrelR: 0.012, barrelY: 0.005,
+      bullpup: true, topMag: true, muzzle: { len: 0.05, r: 0.02 },
+    },
+  },
+  knife: {
+    name: 'M48 Tomahawk', short: 'НОЖ', cat: 'Ближний бой', dmg: 60, cd: 0.45, mag: 0, res: 0,
+    auto: true, reload: 0, recoil: 0, recoilYaw: 0, kick: 0.05, base: 0, grow: 0,
+    movePen: 0, recover: 5, speed: 1.06, reward: 1500, sound: 'knife', melee: true,
+    gun: {
+      body: [0.026, 0.03, 0.13], bodyMat: 'poly', bodyColor: 0x33383e,
+      barrelLen: 0, barrelR: 0, blade: { len: 0.17, w: 0.036 },
+    },
+  },
 }
+
+export const WEAPON_ORDER: WeaponId[] = ['ak', 'awp', 'deagle', 'p90', 'knife']
+
 
 interface Particle { m: THREE.Mesh; v: THREE.Vector3; g: number; life: number; max: number }
 interface Tracer { m: THREE.Mesh; life: number }
@@ -92,11 +183,16 @@ export class Game {
   private cooldown = 0
   private firing = false
 
+  // сенсорный ввод (мобильные)
+  private joyX = 0
+  private joyY = 0
+  private lookDX = 0
+  private lookDY = 0
+  private touchJump = false
+
   // weapons
   private equipped: WeaponId = 'deagle'
-  private ammo: Record<WeaponId, { mag: number; res: number }> = {
-    ak: { mag: 30, res: 90 }, awp: { mag: 5, res: 30 }, deagle: { mag: 7, res: 35 },
-  }
+  private ammo: Record<WeaponId, { mag: number; res: number }> = {} as Record<WeaponId, { mag: number; res: number }>
   private scoped = false
   private switchAnim = 1
   private lastCX = 0
@@ -124,8 +220,10 @@ export class Game {
 
   // fx objects
   private weapon = new THREE.Group()
-  private weaponModels: Record<WeaponId, THREE.Group> = { ak: new THREE.Group(), awp: new THREE.Group(), deagle: new THREE.Group() }
-  private weaponMuzzles: Record<WeaponId, THREE.Object3D> = { ak: new THREE.Object3D(), awp: new THREE.Object3D(), deagle: new THREE.Object3D() }
+  private weaponModels: Record<WeaponId, THREE.Group> = {} as Record<WeaponId, THREE.Group>
+  private weaponMuzzles: Record<WeaponId, THREE.Object3D> = {} as Record<WeaponId, THREE.Object3D>
+  private wheelOpen = false
+  private wheelIndex = 0
   private flash: THREE.Mesh
   private flashT = 0
   private gunLight: THREE.PointLight
@@ -141,8 +239,9 @@ export class Game {
     this.container = container
     this.hooks = hooks
 
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' })
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.75))
+    this.renderer = new THREE.WebGLRenderer({ antialias: !IS_TOUCH, powerPreference: 'high-performance' })
+    // на телефонах снижаем плотность пикселей ради стабильного FPS
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, IS_TOUCH ? 1.3 : 1.75))
     this.renderer.setSize(container.clientWidth, container.clientHeight)
     this.renderer.shadowMap.enabled = true
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap
@@ -162,7 +261,7 @@ export class Game {
     const sun = new THREE.DirectionalLight(0xffeccc, 2.6)
     sun.position.set(-26, 38, -18)
     sun.castShadow = true
-    sun.shadow.mapSize.set(2048, 2048)
+    sun.shadow.mapSize.set(IS_TOUCH ? 1024 : 2048, IS_TOUCH ? 1024 : 2048)
     sun.shadow.camera.left = -34
     sun.shadow.camera.right = 34
     sun.shadow.camera.top = 34
@@ -183,10 +282,10 @@ export class Game {
 
     this.buildWeapons()
     this.flash = this.buildFlash(0.55)
-    this.weaponMuzzles.deagle.add(this.flash)
+    this.weaponMuzzles[this.equipped].add(this.flash)
 
-    // pools
-    for (let i = 0; i < 24; i++) {
+    // pools (на телефонах — меньше объектов)
+    for (let i = 0; i < (IS_TOUCH ? 12 : 24); i++) {
       const m = new THREE.Mesh(
         new THREE.BoxGeometry(1, 1, 1),
         new THREE.MeshBasicMaterial({ color: 0xffd27a, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false })
@@ -199,7 +298,7 @@ export class Game {
     // гильзы
     const shellGeo = new THREE.BoxGeometry(0.016, 0.05, 0.016)
     const shellMat = new THREE.MeshStandardMaterial({ color: 0xd9a441, metalness: 0.85, roughness: 0.35 })
-    for (let i = 0; i < 22; i++) {
+    for (let i = 0; i < (IS_TOUCH ? 10 : 22); i++) {
       const m = new THREE.Mesh(shellGeo, shellMat)
       m.visible = false
       this.scene.add(m)
@@ -207,7 +306,7 @@ export class Game {
     }
     // декали попаданий
     const decalGeo = new THREE.PlaneGeometry(0.1, 0.1)
-    for (let i = 0; i < 40; i++) {
+    for (let i = 0; i < (IS_TOUCH ? 16 : 40); i++) {
       const m = new THREE.Mesh(decalGeo, new THREE.MeshBasicMaterial({ color: 0x14100a, transparent: true, opacity: 0, depthWrite: false }))
       m.visible = false
       this.scene.add(m)
@@ -217,7 +316,10 @@ export class Game {
     // постобработка: bloom + тонмаппинг
     this.composer = new EffectComposer(this.renderer)
     this.composer.addPass(new RenderPass(this.scene, this.camera))
-    this.composer.addPass(new UnrealBloomPass(new THREE.Vector2(container.clientWidth, container.clientHeight), 0.5, 0.5, 0.82))
+    // bloom — дорогая операция, на телефонах отключаем для плавности
+    if (!IS_TOUCH) {
+      this.composer.addPass(new UnrealBloomPass(new THREE.Vector2(container.clientWidth, container.clientHeight), 0.5, 0.5, 0.82))
+    }
     this.composer.addPass(new OutputPass())
 
     this.pos.set(this.map.playerSpawn.x, 0, this.map.playerSpawn.z)
@@ -227,91 +329,285 @@ export class Game {
 
   /* ================= weapon ================= */
 
+  /* ---------- процедурные текстуры оружия ---------- */
+
+  private texCanvas(size: number, draw: (g: CanvasRenderingContext2D, s: number) => void): THREE.CanvasTexture {
+    const cv = document.createElement('canvas')
+    cv.width = cv.height = size
+    const g = cv.getContext('2d')!
+    draw(g, size)
+    const t = new THREE.CanvasTexture(cv)
+    t.wrapS = t.wrapT = THREE.RepeatWrapping
+    t.colorSpace = THREE.SRGBColorSpace
+    t.anisotropy = 4
+    return t
+  }
+
+  private texMetal(base: string) {
+    return this.texCanvas(128, (g, s) => {
+      g.fillStyle = base
+      g.fillRect(0, 0, s, s)
+      for (let i = 0; i < 300; i++) {
+        g.fillStyle = Math.random() > 0.5 ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.10)'
+        g.fillRect(Math.random() * s, Math.random() * s, 1 + Math.random() * 2.2, 1)
+      }
+      g.globalAlpha = 0.09
+      g.strokeStyle = '#ffffff'
+      for (let i = 0; i < 24; i++) {
+        const y = Math.random() * s
+        g.beginPath(); g.moveTo(0, y); g.lineTo(s, y + (Math.random() - 0.5) * 5); g.stroke()
+      }
+      g.globalAlpha = 1
+    })
+  }
+
+  private texWood() {
+    return this.texCanvas(128, (g, s) => {
+      g.fillStyle = '#8a5a2c'
+      g.fillRect(0, 0, s, s)
+      for (let i = 0; i < 26; i++) {
+        g.strokeStyle = `rgba(58,32,10,${0.14 + Math.random() * 0.26})`
+        g.lineWidth = 1 + Math.random() * 2.2
+        const x = Math.random() * s
+        g.beginPath()
+        g.moveTo(x, 0)
+        g.bezierCurveTo(x + 9, s * 0.3, x - 9, s * 0.62, x + (Math.random() - 0.5) * 12, s)
+        g.stroke()
+      }
+      for (let i = 0; i < 220; i++) {
+        g.fillStyle = 'rgba(38,20,6,0.14)'
+        g.fillRect(Math.random() * s, Math.random() * s, 1.6, 1.6)
+      }
+      g.globalAlpha = 0.07
+      g.fillStyle = '#eec27f'
+      for (let i = 0; i < 6; i++) {
+        g.beginPath()
+        g.ellipse(Math.random() * s, Math.random() * s, 16 + Math.random() * 22, 5 + Math.random() * 4, 0, 0, 7)
+        g.fill()
+      }
+      g.globalAlpha = 1
+    })
+  }
+
+  private texPolymer(base: string) {
+    return this.texCanvas(128, (g, s) => {
+      g.fillStyle = base
+      g.fillRect(0, 0, s, s)
+      for (let i = 0; i < 460; i++) {
+        g.fillStyle = Math.random() > 0.5 ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.12)'
+        g.fillRect(Math.random() * s, Math.random() * s, 1.7, 1.7)
+      }
+      g.globalAlpha = 0.08
+      g.strokeStyle = '#000000'
+      for (let i = 0; i < 11; i++) {
+        const x = Math.random() * s
+        const y = Math.random() * s
+        g.beginPath(); g.moveTo(x, y)
+        g.lineTo(x + (Math.random() - 0.5) * 34, y + (Math.random() - 0.5) * 34)
+        g.stroke()
+      }
+      g.globalAlpha = 1
+    })
+  }
+
+  /* ---------- детальная сборка моделей оружия ---------- */
+
+  private buildGunModel(spec: GunSpec): { group: THREE.Group; muzzle: THREE.Object3D } {
+    const g = new THREE.Group()
+    const muzzle = new THREE.Object3D()
+    const css = (c: number) => `#${c.toString(16).padStart(6, '0')}`
+
+    // материалы с текстурами
+    const matMetal = new THREE.MeshStandardMaterial({ map: this.texMetal(css(spec.bodyMat === 'metal' ? spec.bodyColor : 0x2b2e33)), roughness: 0.46, metalness: 0.72 })
+    const matDark = new THREE.MeshStandardMaterial({ map: this.texMetal('#17191c'), roughness: 0.4, metalness: 0.8 })
+    const matWood = new THREE.MeshStandardMaterial({ map: this.texWood(), roughness: 0.66, metalness: 0.06 })
+    const matPoly = new THREE.MeshStandardMaterial({ map: this.texPolymer(css(spec.bodyColor)), roughness: 0.85, metalness: 0.1 })
+    const matBody = spec.bodyMat === 'wood' ? matWood : spec.bodyMat === 'poly' ? matPoly : matMetal
+    const matBlade = new THREE.MeshStandardMaterial({ color: 0xd9dee3, roughness: 0.22, metalness: 0.95 })
+
+    const box = (w: number, h: number, d: number, m: THREE.Material, x: number, y: number, z: number, rx = 0, ry = 0, rz = 0) => {
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m)
+      mesh.position.set(x, y, z)
+      mesh.rotation.set(rx, ry, rz)
+      g.add(mesh)
+      return mesh
+    }
+    const cyl = (r1: number, r2: number, len: number, m: THREE.Material, x: number, y: number, z: number, seg = 14) => {
+      const mesh = new THREE.Mesh(new THREE.CylinderGeometry(r1, r2, len, seg), m)
+      mesh.rotation.x = Math.PI / 2
+      mesh.position.set(x, y, z)
+      g.add(mesh)
+      return mesh
+    }
+
+    const [bw, bh, bd] = spec.body
+    const barrelY = spec.barrelY ?? 0.015
+
+    /* ---- нож ---- */
+    if (spec.melee && spec.blade) {
+      const bl = spec.blade
+      box(0.03, 0.034, 0.13, matPoly, 0, 0.005, 0.075)                          // рукоять
+      box(0.032, 0.012, 0.03, matDark, 0, -0.014, 0.05)                          // подпальцевая выемка
+      box(0.032, 0.012, 0.03, matDark, 0, -0.014, 0.085)
+      box(0.034, 0.016, 0.018, matDark, 0, 0.005, 0.148)                         // тыльник
+      box(0.052, 0.014, 0.02, matMetal, 0, 0.012, 0.0)                           // гарда
+      box(bl.w, 0.008, bl.len, matBlade, 0, 0.02, -bl.len / 2 - 0.01)            // клинок
+      box(bl.w * 0.92, 0.003, bl.len, new THREE.MeshStandardMaterial({ color: 0xf4f7fa, roughness: 0.12, metalness: 1 }), 0, 0.0155, -bl.len / 2 - 0.01) // кромка
+      box(bl.w * 0.3, 0.004, bl.len * 0.9, matDark, 0, 0.026, -bl.len / 2 - 0.015) // обух
+      const tip = box(bl.w * 0.62, 0.007, bl.w * 0.62, matBlade, 0, 0.02, -bl.len - 0.01 - bl.w * 0.2, 0, Math.PI / 4)
+      tip.scale.z = 0.55
+      muzzle.position.set(0, 0.02, -bl.len - 0.05)
+      g.add(muzzle)
+      return { group: g, muzzle }
+    }
+
+    /* ---- пистолет ---- */
+    if (spec.pistol) {
+      const slideMat = new THREE.MeshStandardMaterial({ map: this.texMetal(css(spec.slideColor ?? 0xc9ced4)), roughness: 0.3, metalness: 0.85 })
+      box(bw, bh * 0.9, bd, matMetal, 0, -0.006, 0)                              // рамка
+      box(bw * 1.04, bh * 0.62, bd * 1.02, slideMat, 0, bh * 0.5, 0)             // затвор
+      if (spec.serrations) {                                                     // насечки затвора
+        for (let i = 0; i < 6; i++) {
+          box(0.002, bh * 0.5, 0.008, matDark, bw * 0.53, bh * 0.5, bd * 0.28 + i * 0.012)
+          box(0.002, bh * 0.5, 0.008, matDark, -bw * 0.53, bh * 0.5, bd * 0.28 + i * 0.012)
+        }
+      }
+      cyl(spec.barrelR * 0.9, spec.barrelR * 0.9, 0.06, matDark, 0, bh * 0.5, -bd / 2 - 0.02) // выступающий ствол
+      box(0.012, 0.03, 0.012, slideMat, 0, bh * 0.86, -bd * 0.4)                 // мушка
+      box(bw * 0.8, 0.02, 0.016, slideMat, 0, bh * 0.84, bd * 0.34)              // целик
+      box(bw * 0.9, 0.05, 0.05, matDark, 0, bh * 0.16, bd * 0.44)                // хвост затвора
+      box(bw * 0.94, bh * 1.5, 0.075, matMetal, 0, -bh * 1.05, bd * 0.26, -0.2)  // рукоять
+      box(bw * 0.8, 0.05, 0.02, matDark, 0, -bh * 1.62, bd * 0.2)                // пятка магазина
+      box(0.018, 0.04, 0.05, matDark, 0, -bh * 0.55, bd * 0.05)                  // спусковая скоба
+      box(0.008, 0.03, 0.014, matDark, 0, -bh * 0.36, 0.02)                      // спусковой крючок
+      box(bw * 0.5, 0.028, 0.014, matDark, 0, bh * 0.62, bd * 0.52, -0.5)        // молоток
+      muzzle.position.set(0, bh * 0.5, -bd / 2 - 0.055)
+      g.add(muzzle)
+      return { group: g, muzzle }
+    }
+
+    /* ---- общее: винтовки / ПП ---- */
+    box(bw, bh, bd, matBody, 0, 0, 0)                                            // ствольная коробка
+
+    // зубья планки пикатини сверху
+    const teeth = Math.floor(bd / 0.045)
+    for (let i = 0; i < teeth; i++) box(bw * 0.5, 0.011, 0.016, matDark, 0, bh / 2 + 0.005, -bd / 2 + 0.03 + i * 0.045)
+
+    // ствол + дульное устройство
+    let zEnd = -bd / 2
+    if (spec.barrelLen > 0) {
+      cyl(spec.barrelR, spec.barrelR, spec.barrelLen, matDark, 0, barrelY, zEnd - spec.barrelLen / 2)
+      zEnd -= spec.barrelLen
+    }
+    if (spec.muzzle) {
+      cyl(spec.muzzle.r, spec.muzzle.r, spec.muzzle.len, matMetal, 0, barrelY, zEnd - spec.muzzle.len / 2)
+      cyl(spec.muzzle.r * 0.55, spec.muzzle.r * 0.55, spec.muzzle.len * 0.5, matDark, 0, barrelY, zEnd - spec.muzzle.len * 0.55) // внутренний канал
+      zEnd -= spec.muzzle.len
+    }
+
+    // газовая трубка + прицельные (АК)
+    if (spec.gasTube) {
+      cyl(0.011, 0.011, (spec.handguard?.[2] ?? 0.2) * 0.95, matMetal, 0, barrelY + bh * 0.42, -bd / 2 - (spec.handguard?.[2] ?? 0.2) * 0.47)
+      box(bw * 0.7, bh * 0.5, 0.03, matMetal, 0, barrelY + bh * 0.28, -bd / 2 - (spec.handguard?.[2] ?? 0.2) - 0.015) // колодка мушки
+      box(0.008, 0.05, 0.008, matDark, 0, barrelY + bh * 0.62, -bd / 2 - (spec.handguard?.[2] ?? 0.2) - 0.015)
+      box(0.044, 0.02, 0.014, matDark, 0, bh / 2 + 0.02, bd * 0.3)               // целик
+      box(0.012, 0.03, 0.05, matDark, bw * 0.42, 0.02, bd * 0.05)                // рукоятка взведения
+    }
+
+    // цевьё с вентиляционными окнами
+    if (spec.handguard) {
+      const [hw, hh, hd] = spec.handguard
+      const hm = spec.handguardMat === 'wood' ? matWood : matPoly
+      box(hw, hh, hd, hm, 0, barrelY - hh * 0.12, -bd / 2 - hd / 2 + 0.012)
+      box(hw * 0.86, hh * 0.4, hd * 0.96, matDark, 0, barrelY + hh * 0.42, -bd / 2 - hd / 2 + 0.012) // верхняя накладка
+      for (let i = 0; i < 3; i++) {
+        box(0.004, hh * 0.5, 0.045, matDark, hw * 0.505, barrelY - hh * 0.12, -bd / 2 - 0.05 - i * 0.07)
+        box(0.004, hh * 0.5, 0.045, matDark, -hw * 0.505, barrelY - hh * 0.12, -bd / 2 - 0.05 - i * 0.07)
+      }
+    }
+
+    // магазин
+    if (spec.mag) {
+      const m = spec.mag
+      box(m.w, m.h, m.d, matDark, m.x ?? 0, -bh / 2 - m.h / 2 + 0.025, (m.z ?? 0) + 0.02, m.tilt)
+      box(m.w * 0.9, 0.02, m.d * 0.9, matMetal, m.x ?? 0, -bh / 2 - m.h + 0.03, (m.z ?? 0) + 0.02 + Math.sin(m.tilt) * m.h * 0.45, m.tilt)
+    }
+
+    // верхний магазин P90 (полупрозрачный)
+    if (spec.topMag) {
+      const tm = new THREE.MeshStandardMaterial({ color: 0x9aa862, roughness: 0.4, metalness: 0.1, transparent: true, opacity: 0.55 })
+      box(bw * 0.92, 0.024, bd * 0.86, tm, 0, bh / 2 + 0.012, -0.01)
+      for (let i = 0; i < 8; i++) box(0.008, 0.02, 0.014, new THREE.MeshStandardMaterial({ color: 0xd8b45a, metalness: 0.8, roughness: 0.35 }), 0, bh / 2 + 0.012, -bd * 0.3 + i * 0.045)
+    }
+
+    // буллпап: задняя часть и упор
+    if (spec.bullpup) {
+      box(bw * 0.9, bh * 1.12, 0.09, matBody, 0, -0.004, bd / 2 + 0.035)
+      box(bw * 0.94, bh * 0.9, 0.02, matDark, 0, -0.004, bd / 2 + 0.085)         // затыльник
+      box(bw * 0.8, 0.03, 0.1, matDark, 0, bh / 2 + 0.012, bd * 0.28)            // щека
+      box(bw * 0.7, 0.05, 0.12, matBody, 0, -bh / 2 - 0.02, -bd * 0.3, -0.55)    // наклонная передняя кромка
+      box(0.016, 0.05, 0.05, matDark, bw * 0.4, 0.01, -bd * 0.34)                // боковая планка
+      box(0.016, 0.05, 0.05, matDark, -bw * 0.4, 0.01, -bd * 0.34)
+    }
+
+    // приклад
+    if (spec.stock) {
+      const st = spec.stock
+      const sm = st.mat === 'wood' ? matWood : new THREE.MeshStandardMaterial({ map: this.texPolymer(css(st.color)), roughness: 0.8, metalness: 0.12 })
+      box(bw * 0.88, bh * 1.05, st.l * 0.5, sm, 0, -st.drop * 0.35, bd / 2 + st.l * 0.25)
+      box(bw * 0.92, bh * 1.4, st.l * 0.5, sm, 0, -st.drop, bd / 2 + st.l * 0.75)
+      box(bw * 0.96, bh * 1.45, 0.018, matDark, 0, -st.drop, bd / 2 + st.l + 0.002) // затыльник
+    }
+
+    // рукоять + спусковая скоба
+    if (spec.grip) {
+      box(bw * 0.85, 0.115, 0.06, matBody, 0, -bh / 2 - 0.055, bd * 0.3, -0.22)
+      box(bw * 0.7, 0.03, 0.02, matDark, 0, -bh / 2 - 0.1, bd * 0.16)
+    }
+
+    // оптика с линзой
+    if (spec.scope) {
+      const sc = spec.scope
+      const y = bh / 2 + sc.r + 0.024
+      cyl(sc.r, sc.r, sc.len, matDark, 0, y, -0.02)
+      cyl(sc.r * 1.45, sc.r, 0.055, matDark, 0, y, -0.02 - sc.len / 2)          // объектив
+      cyl(sc.r * 1.2, sc.r, 0.05, matDark, 0, y, -0.02 + sc.len / 2)            // окуляр
+      const lens = new THREE.Mesh(new THREE.CircleGeometry(sc.r * 1.3, 20), new THREE.MeshBasicMaterial({ color: 0x9fd4ff }))
+      lens.position.set(0, y, -0.02 + sc.len / 2 + 0.027)
+      lens.rotation.y = Math.PI
+      g.add(lens)
+      box(0.014, 0.05, 0.03, matDark, 0, bh / 2 + 0.01, -0.06)                   // кронштейн 1
+      box(0.014, 0.05, 0.03, matDark, 0, bh / 2 + 0.01, 0.04)                    // кронштейн 2
+      box(0.004, 0.02, 0.004, matDark, 0, y + sc.r + 0.012, -0.1)                // маховик поправок
+    }
+
+    // сошки
+    if (spec.bipod) {
+      box(0.012, 0.2, 0.012, matDark, 0.02, -bh / 2 - 0.08, -bd * 0.36, 0.45, 0, 0.28)
+      box(0.012, 0.2, 0.012, matDark, -0.02, -bh / 2 - 0.08, -bd * 0.36, 0.45, 0, -0.28)
+      box(0.05, 0.02, 0.05, matDark, 0, -bh / 2 - 0.012, -bd * 0.36)
+    }
+
+    // рукоять затвора
+    if (spec.boltHandle) {
+      box(0.012, 0.012, 0.07, matMetal, bw * 0.55, -0.005, bd * 0.1, 0, 0, 0.7)
+      cyl(0.011, 0.011, 0.024, matMetal, bw * 0.58, -0.035, bd * 0.07)
+    }
+
+    muzzle.position.set(0, barrelY, zEnd - 0.02)
+    g.add(muzzle)
+    return { group: g, muzzle }
+  }
+
   private buildWeapons() {
     const root = this.weapon
-    const metal = new THREE.MeshStandardMaterial({ color: 0x26282c, roughness: 0.5, metalness: 0.65 })
-    const darkMetal = new THREE.MeshStandardMaterial({ color: 0x1b1d20, roughness: 0.4, metalness: 0.75 })
-    const wood = new THREE.MeshStandardMaterial({ color: 0x7c4a24, roughness: 0.75, metalness: 0.1 })
-    const awpGreen = new THREE.MeshStandardMaterial({ color: 0x42503a, roughness: 0.7, metalness: 0.25 })
-
-    // ---- AK-47 ----
-    const ak = this.weaponModels.ak
-    const akBox = (bw: number, bh: number, bd: number, m: THREE.Material, x: number, y: number, z: number, rx = 0) => {
-      const mesh = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, bd), m)
-      mesh.position.set(x, y, z)
-      mesh.rotation.x = rx
-      ak.add(mesh)
+    for (const id of WEAPON_ORDER) {
+      const { group, muzzle } = this.buildGunModel(WEAPONS[id].gun)
+      this.weaponModels[id] = group
+      this.weaponMuzzles[id] = muzzle
+      root.add(group)
+      group.visible = false
     }
-    akBox(0.075, 0.095, 0.5, metal, 0, 0, -0.04)
-    const akBarrel = new THREE.Mesh(new THREE.CylinderGeometry(0.016, 0.016, 0.36, 10), metal)
-    akBarrel.rotation.x = Math.PI / 2
-    akBarrel.position.set(0, 0.022, -0.46)
-    ak.add(akBarrel)
-    akBox(0.068, 0.072, 0.24, wood, 0, -0.004, -0.28)
-    akBox(0.03, 0.03, 0.3, metal, 0, 0.062, -0.32)
-    akBox(0.058, 0.2, 0.1, metal, 0, -0.16, 0.03, 0.22)
-    akBox(0.06, 0.085, 0.24, wood, 0, -0.012, 0.3)
-    akBox(0.012, 0.05, 0.012, metal, 0, 0.078, -0.6)
-    akBox(0.05, 0.03, 0.02, metal, 0, 0.062, 0.1)
-    this.weaponMuzzles.ak.position.set(0, 0.022, -0.66)
-    ak.add(this.weaponMuzzles.ak)
-
-    // ---- Desert Eagle ----
-    const de = this.weaponModels.deagle
-    const deBox = (bw: number, bh: number, bd: number, m: THREE.Material, x: number, y: number, z: number, rx = 0) => {
-      const mesh = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, bd), m)
-      mesh.position.set(x, y, z)
-      mesh.rotation.x = rx
-      de.add(mesh)
-    }
-    deBox(0.052, 0.062, 0.3, darkMetal, 0, 0.02, -0.02)           // slide
-    deBox(0.046, 0.05, 0.26, metal, 0, -0.03, -0.02)               // frame
-    deBox(0.048, 0.15, 0.07, darkMetal, 0, -0.12, 0.09, -0.22)     // grip
-    deBox(0.02, 0.05, 0.05, metal, 0, -0.065, 0.02)                // trigger guard
-    deBox(0.014, 0.03, 0.014, metal, 0, 0.062, -0.12)              // front sight
-    deBox(0.04, 0.02, 0.016, metal, 0, 0.058, 0.11)                // rear sight
-    const deBarrel = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, 0.07, 10), darkMetal)
-    deBarrel.rotation.x = Math.PI / 2
-    deBarrel.position.set(0, 0.02, -0.19)
-    de.add(deBarrel)
-    this.weaponMuzzles.deagle.position.set(0, 0.02, -0.24)
-    de.add(this.weaponMuzzles.deagle)
-
-    // ---- AWP ----
-    const aw = this.weaponModels.awp
-    const awBox = (bw: number, bh: number, bd: number, m: THREE.Material, x: number, y: number, z: number, rx = 0) => {
-      const mesh = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, bd), m)
-      mesh.position.set(x, y, z)
-      mesh.rotation.x = rx
-      aw.add(mesh)
-    }
-    awBox(0.06, 0.085, 0.62, awpGreen, 0, 0, 0)                    // receiver
-    const awBarrel = new THREE.Mesh(new THREE.CylinderGeometry(0.014, 0.014, 0.52, 10), darkMetal)
-    awBarrel.rotation.x = Math.PI / 2
-    awBarrel.position.set(0, 0.015, -0.56)
-    aw.add(awBarrel)
-    awBox(0.034, 0.034, 0.1, darkMetal, 0, 0.015, -0.85)           // muzzle brake
-    const scope = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.24, 12), darkMetal)
-    scope.rotation.x = Math.PI / 2
-    scope.position.set(0, 0.085, -0.06)
-    aw.add(scope)
-    const scopeEye = new THREE.Mesh(new THREE.CylinderGeometry(0.036, 0.03, 0.05, 12), metal)
-    scopeEye.rotation.x = Math.PI / 2
-    scopeEye.position.set(0, 0.085, 0.08)
-    aw.add(scopeEye)
-    awBox(0.012, 0.04, 0.012, metal, 0, 0.045, -0.06)              // scope mount
-    awBox(0.055, 0.11, 0.24, awpGreen, 0, -0.015, 0.42)            // stock
-    awBox(0.05, 0.05, 0.1, awpGreen, 0, 0.055, 0.34)               // cheek rest
-    awBox(0.05, 0.12, 0.08, darkMetal, 0, -0.1, 0.04, 0.1)         // magazine
-    awBox(0.05, 0.06, 0.08, awpGreen, 0, -0.06, -0.28)             // foregrip
-    awBox(0.014, 0.045, 0.014, metal, 0, 0.045, 0.3)               // bolt handle
-    this.weaponMuzzles.awp.position.set(0, 0.015, -0.92)
-    aw.add(this.weaponMuzzles.awp)
-
-    for (const id of ['ak', 'awp', 'deagle'] as WeaponId[]) root.add(this.weaponModels[id])
-    this.weaponModels.ak.visible = false
-    this.weaponModels.awp.visible = false
-    this.weaponModels.deagle.visible = true
     root.position.set(0.24, -0.22, -0.45)
     this.camera.add(root)
   }
@@ -337,22 +633,24 @@ export class Game {
     this.keys[e.code] = true
     if (this.state !== 'playing') return
     if (e.code === 'Escape' && !this.locked) { this.pause(); return }
+    if (e.code === 'Tab') { e.preventDefault(); this.openWheel(); return }
+    if (this.wheelOpen) return // в колесе выбора работают только Tab/цифры
     if (e.code === 'KeyR') this.startReload()
     if (e.code === 'KeyG') this.throwNade()
-    if (e.code === 'Digit1') this.switchTo('ak')
-    if (e.code === 'Digit2') this.switchTo('deagle')
-    if (e.code === 'Digit3') this.switchTo('awp')
+    const num = ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6', 'Digit7', 'Digit8', 'Digit9'].indexOf(e.code)
+    if (num >= 0 && num < WEAPON_ORDER.length) this.switchTo(WEAPON_ORDER[num])
   }
-  private onKeyUp = (e: KeyboardEvent) => { this.keys[e.code] = false }
+  private onKeyUp = (e: KeyboardEvent) => {
+    this.keys[e.code] = false
+    if (e.code === 'Tab') { e.preventDefault(); this.closeWheel(true) }
+  }
   private onWheel = (e: WheelEvent) => {
-    if (this.state !== 'playing') return
-    const order: WeaponId[] = ['ak', 'deagle', 'awp']
-    const i = order.indexOf(this.equipped)
-    const n = order.length
-    this.switchTo(order[(i + (e.deltaY > 0 ? 1 : n - 1)) % n])
+    if (this.state !== 'playing' || this.wheelOpen) return
+    this.cycleWeapon(e.deltaY > 0 ? 1 : -1)
   }
 
   private onMouseMove = (e: MouseEvent) => {
+    if (this.wheelOpen) { this.wheelPick(e.clientX, e.clientY); return }
     if (this.state !== 'playing') return
     if (this.locked) {
       // захват мыши: движение 1:1
@@ -399,10 +697,11 @@ export class Game {
 
   private onLockChange = () => {
     const locked = document.pointerLockElement === this.renderer.domElement
-    if (this.locked && !locked && this.state === 'playing') this.pause()
+    // при открытом колесе выбора захват освобождается намеренно — не паузим
+    if (this.locked && !locked && this.state === 'playing' && !this.wheelOpen) this.pause()
     this.mouseInit = false
     this.locked = locked
-    this.hooks.lockedChange(locked)
+    if (!this.wheelOpen) this.hooks.lockedChange(locked)
   }
   private onResize = () => {
     const w = this.container.clientWidth
@@ -477,6 +776,36 @@ export class Game {
     if (document.pointerLockElement) document.exitPointerLock()
   }
 
+  /* ================= сенсорный ввод (мобильные) ================= */
+
+  /** Виртуальный джойстик: x — стрейф (-1..1, вправо положит.), y — вперёд (-1..1, вверх положит.) */
+  setMoveInput(x: number, y: number) {
+    this.joyX = Math.max(-1, Math.min(1, x))
+    this.joyY = Math.max(-1, Math.min(1, y))
+  }
+
+  /** Зона обзора: накопить дельту движения пальца */
+  addLook(dx: number, dy: number) {
+    this.lookDX += dx
+    this.lookDY += dy
+  }
+
+  setFiring(on: boolean) {
+    if (this.state !== 'playing') { this.firing = false; return }
+    this.firing = on
+    if (on) this.tryShoot()
+  }
+
+  doJump() { if (this.state === 'playing') this.touchJump = true }
+  doReload() { if (this.state === 'playing') this.startReload() }
+  doGrenade() { if (this.state === 'playing') this.throwNade() }
+  doScope() { if (this.state === 'playing' && this.equipped === 'awp') this.toggleScope() }
+
+  switchWeaponByIndex(i: number) {
+    if (i >= 0 && i < WEAPON_ORDER.length) this.switchTo(WEAPON_ORDER[i])
+  }
+  cycleWeaponPub(dir: number) { this.cycleWeapon(dir) }
+
   dispose() {
     cancelAnimationFrame(this.raf)
     window.removeEventListener('keydown', this.onKeyDown)
@@ -519,7 +848,7 @@ export class Game {
     this.hp = 100
     this.armor = 100
     // каждый раунд — полный боезапас всех стволов
-    for (const id of ['ak', 'awp', 'deagle'] as WeaponId[]) {
+    for (const id of WEAPON_ORDER) {
       this.ammo[id] = { mag: WEAPONS[id].mag, res: WEAPONS[id].res }
     }
     this.nades = Math.min(3, this.round)
@@ -605,6 +934,7 @@ export class Game {
 
   private startReload() {
     const cfg = WEAPONS[this.equipped]
+    if (cfg.melee || cfg.reload <= 0) return // нож и Zeus не перезаряжаются
     const a = this.ammo[this.equipped]
     if (this.reloading || a.mag >= cfg.mag || this.state !== 'playing') return
     if (a.res <= 0) {
@@ -619,27 +949,30 @@ export class Game {
   }
 
   private tryShoot() {
-    if (this.state !== 'playing' || this.cooldown > 0 || this.reloading || this.switchAnim < 1) return
+    if (this.state !== 'playing' || this.cooldown > 0 || this.reloading || this.switchAnim < 1 || this.wheelOpen) return
     const cfg = WEAPONS[this.equipped]
+    if (cfg.melee) { this.meleeAttack(cfg); return }
     const a = this.ammo[this.equipped]
     if (a.mag <= 0) {
       this.sfx.dry()
       this.firing = false
-      this.startReload()
+      if (cfg.reload > 0) this.startReload()
       return
     }
     a.mag--
     this.cooldown = cfg.cd
-    if (this.equipped === 'awp') this.sfx.sniper()
-    else if (this.equipped === 'deagle') this.sfx.pistol()
+    if (cfg.sound === 'sniper') this.sfx.sniper()
+    else if (cfg.sound === 'pistol') this.sfx.pistol()
+    else if (cfg.sound === 'smg') this.sfx.smg()
     else this.sfx.shoot()
 
     // fx
-    this.flashT = this.equipped === 'awp' ? 0.07 : 0.04
+    const big = cfg.sound === 'sniper'
+    this.flashT = big ? 0.07 : 0.04
     this.flash.rotation.z = Math.random() * Math.PI
-    const fs = (this.equipped === 'awp' ? 1.2 : 0.75) + Math.random() * 0.5
+    const fs = (big ? 1.2 : cfg.sound === 'pistol' ? 0.55 : 0.75) + Math.random() * 0.5
     this.flash.scale.set(fs, fs, fs)
-    this.gunLight.intensity = this.equipped === 'awp' ? 40 : 26
+    this.gunLight.intensity = big ? 40 : 26
     this.kick = Math.min(1.6, this.kick + 1)
     this.recoilPitch += cfg.recoil + Math.random() * cfg.recoil * 0.5
     this.recoilYaw += (Math.random() - 0.5) * cfg.recoilYaw * 2
@@ -650,7 +983,7 @@ export class Game {
     this.camera.getWorldDirection(this.tmpD)
     const hSpeed = Math.hypot(this.vel.x, this.vel.z)
     let spreadRad: number
-    if (this.equipped === 'awp') {
+    if (cfg.sound === 'sniper') {
       spreadRad = this.scoped ? 0.0012 + this.spread * 0.004 : 0.075 + this.spread * 0.03 + (hSpeed > 1.2 ? 0.05 : 0)
     } else {
       spreadRad = cfg.base + this.spread * cfg.grow + (hSpeed > 1.2 ? cfg.movePen : 0) + (this.onGround ? 0 : 0.012)
@@ -670,7 +1003,7 @@ export class Game {
     const muzzlePos = new THREE.Vector3()
     this.weaponMuzzles[this.equipped].getWorldPosition(muzzlePos)
     const end = hits.length ? hits[0].point : this.tmpV.clone().addScaledVector(this.tmpD, 120)
-    this.spawnTracer(muzzlePos, end, 0xffd27a)
+    this.spawnTracer(muzzlePos, end, cfg.sound === 'sniper' ? 0xffe9a0 : 0xffd27a)
     this.burst(muzzlePos, 0x9c9a90, 2, 0.6, 0.6, -2.2) // пороховой дым
 
     if (hits.length) {
@@ -692,6 +1025,29 @@ export class Game {
           const nrm = new THREE.Vector3().copy(hits[0].face.normal).transformDirection(hits[0].object.matrixWorld)
           this.addDecal(hits[0].point, nrm)
         }
+      }
+    }
+  }
+
+  private meleeAttack(cfg: WeaponDef) {
+    this.cooldown = cfg.cd
+    this.kick = Math.min(1.6, this.kick + 1)
+    this.sfx.knife()
+    this.camera.getWorldDirection(this.tmpD)
+    this.camera.getWorldPosition(this.tmpV)
+    this.ray.set(this.tmpV, this.tmpD)
+    this.ray.far = 2.4
+    const targets: THREE.Object3D[] = []
+    for (const b of this.bots) if (b.alive) targets.push(...b.hitboxes)
+    const hits = this.ray.intersectObjects(targets, false)
+    if (hits.length) {
+      const ud = hits[0].object.userData as { bot?: Bot; part?: string }
+      if (ud.bot && ud.bot.alive) {
+        const head = ud.part === 'head'
+        const killed = ud.bot.hit(ud.part || 'body', head ? cfg.dmg * 2 : cfg.dmg)
+        this.burst(hits[0].point, 0x9e1b1b, 14, 3.6, 0.5)
+        if (killed) this.onBotKilled(ud.bot, head)
+        else { this.hooks.hitmark(head ? 'head' : 'hit'); this.sfx.hit(head) }
       }
     }
   }
@@ -754,14 +1110,58 @@ export class Game {
   }
 
   private applyWeaponVisibility() {
-    this.weaponModels.ak.visible = this.equipped === 'ak'
-    this.weaponModels.awp.visible = this.equipped === 'awp'
-    this.weaponModels.deagle.visible = this.equipped === 'deagle'
+    for (const id of WEAPON_ORDER) this.weaponModels[id].visible = id === this.equipped
     this.weaponMuzzles[this.equipped].add(this.flash)
   }
 
+  private cycleWeapon(dir: number) {
+    if (this.state !== 'playing') return
+    const i = WEAPON_ORDER.indexOf(this.equipped)
+    const n = WEAPON_ORDER.length
+    this.switchTo(WEAPON_ORDER[(i + dir + n) % n])
+  }
+
+  private openWheel() {
+    if (this.state !== 'playing' || this.wheelOpen) return
+    this.wheelOpen = true
+    this.firing = false
+    this.wheelIndex = WEAPON_ORDER.indexOf(this.equipped)
+    if (document.pointerLockElement) document.exitPointerLock()
+    this.emitWheel()
+  }
+
+  private closeWheel(commit: boolean) {
+    if (!this.wheelOpen) return
+    this.wheelOpen = false
+    if (commit) this.switchTo(WEAPON_ORDER[this.wheelIndex])
+    this.hooks.wheel(null)
+    this.requestLock()
+  }
+
+  private emitWheel() {
+    this.hooks.wheel({
+      items: WEAPON_ORDER.map((id) => ({ id, name: WEAPONS[id].name, short: WEAPONS[id].short, cat: WEAPONS[id].cat })),
+      active: this.wheelIndex,
+    })
+  }
+
+  private wheelPick(clientX: number, clientY: number) {
+    if (!this.wheelOpen) return
+    const cx = window.innerWidth / 2
+    const cy = window.innerHeight / 2
+    const dx = clientX - cx
+    const dy = clientY - cy
+    if (Math.hypot(dx, dy) < 40) return // мёртвая зона в центре
+    let ang = Math.atan2(dy, dx) + Math.PI / 2 // 0 = вверх
+    if (ang < 0) ang += Math.PI * 2
+    const n = WEAPON_ORDER.length
+    this.wheelIndex = Math.round((ang / (Math.PI * 2)) * n) % n
+    this.emitWheel()
+  }
+
   private toggleScope(on?: boolean) {
-    if (this.equipped !== 'awp' && on !== false) return
+    const sc = WEAPONS[this.equipped].gun.scope
+    if (!sc && on !== false) return
     const next = on !== undefined ? on : !this.scoped
     if (next === this.scoped) return
     this.scoped = next
@@ -882,7 +1282,7 @@ export class Game {
     for (let i = 0; i < count; i++) {
       let p = this.particles.find((q) => q.life <= 0)
       if (!p) {
-        if (this.particles.length > 280) return
+        if (this.particles.length > (IS_TOUCH ? 120 : 280)) return
         const m = new THREE.Mesh(
           new THREE.BoxGeometry(0.06, 0.06, 0.06),
           new THREE.MeshBasicMaterial({ color, transparent: true })
@@ -1032,9 +1432,19 @@ export class Game {
   }
 
   private updatePlaying(dt: number) {
-    // ---- movement ----
-    const f = (this.keys['KeyW'] ? 1 : 0) - (this.keys['KeyS'] ? 1 : 0)
-    const s = (this.keys['KeyD'] ? 1 : 0) - (this.keys['KeyA'] ? 1 : 0)
+    // ---- обзор с сенсорной зоны (накопленные дельты) ----
+    if (this.lookDX !== 0 || this.lookDY !== 0) {
+      const sens = 0.0042
+      this.yaw -= this.lookDX * sens
+      this.pitch = Math.max(-1.45, Math.min(1.45, this.pitch - this.lookDY * sens))
+      this.lookDX = 0
+      this.lookDY = 0
+    }
+
+    // ---- movement (клавиатура + виртуальный джойстик) ----
+    const clamp = (v: number) => Math.max(-1, Math.min(1, v))
+    const f = clamp(((this.keys['KeyW'] ? 1 : 0) - (this.keys['KeyS'] ? 1 : 0)) + this.joyY)
+    const s = clamp(((this.keys['KeyD'] ? 1 : 0) - (this.keys['KeyA'] ? 1 : 0)) + this.joyX)
     const walk = !!this.keys['ShiftLeft'] || !!this.keys['ShiftRight']
     const wcfg = WEAPONS[this.equipped]
     const speed = (walk ? 2.6 : 5.7) * wcfg.speed * (this.scoped ? 0.42 : 1)
@@ -1049,11 +1459,12 @@ export class Game {
     this.vel.x += (wx - this.vel.x) * k
     this.vel.z += (wz - this.vel.z) * k
 
-    if (this.keys['Space'] && this.onGround) {
+    if ((this.keys['Space'] || this.touchJump) && this.onGround) {
       this.vel.y = 8.2
       this.onGround = false
       this.sfx.jump()
     }
+    this.touchJump = false
     this.vel.y -= 24 * dt
     this.pos.y += this.vel.y * dt
     if (this.pos.y <= 0) { this.pos.y = 0; this.vel.y = 0; this.onGround = true }
@@ -1172,7 +1583,8 @@ export class Game {
       spreadPx: Math.round(this.scoped ? 2 : 5 + this.spread * 30 + (moving ? 4 : 0)),
       enemies: alive,
       reloading: this.reloading,
-      weapon: `${this.equipped === 'ak' ? '1' : this.equipped === 'deagle' ? '2' : '3'}·${WEAPONS[this.equipped].name}`,
+      weapon: `${WEAPON_ORDER.indexOf(this.equipped) + 1}·${WEAPONS[this.equipped].short}`,
+      melee: !!WEAPONS[this.equipped].melee,
     })
     this.hooks.radar({
       px: this.pos.x,
